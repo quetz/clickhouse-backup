@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -24,7 +25,7 @@ import (
 	"github.com/djherbis/buffer"
 	"github.com/djherbis/nio/v3"
 	"github.com/eapache/go-resiliency/retrier"
-	"github.com/mholt/archiver/v4"
+	"github.com/mholt/archives"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 )
@@ -308,11 +309,28 @@ func (bd *BackupDestination) DownloadCompressedStream(ctx context.Context, remot
 	if getArchieveReaderErr != nil {
 		return 0, getArchieveReaderErr
 	}
-	if extractErr := z.Extract(ctx, bufReader, nil, func(ctx context.Context, file archiver.File) error {
+
+	// Decompress if needed
+	var archiveReader io.Reader = bufReader
+	var decompressed io.ReadCloser
+	if z.compression != nil {
+		var err error
+		decompressed, err = z.compression.OpenReader(bufReader)
+		if err != nil {
+			return 0, fmt.Errorf("failed to open decompressor: %w", err)
+		}
+		defer decompressed.Close()
+		archiveReader = decompressed
+	}
+
+	// Extract from archive
+	extractErr := z.archival.Extract(ctx, archiveReader, func(ctx context.Context, file archives.FileInfo) error {
 		src, openErr := file.Open()
 		if openErr != nil {
 			return fmt.Errorf("can't open %s", file.NameInArchive)
 		}
+		defer src.Close()
+
 		header, ok := file.Header.(*tar.Header)
 		if !ok {
 			return fmt.Errorf("expected header to be *tar.Header but was %T", file.Header)
@@ -326,27 +344,24 @@ func (bd *BackupDestination) DownloadCompressedStream(ctx context.Context, remot
 		if createErr != nil {
 			return createErr
 		}
-		if copyBytes, copyErr := io.Copy(dst, readerWrapperForContext(func(p []byte) (int, error) {
+		defer dst.Close()
+
+		copyBytes, copyErr := io.Copy(dst, readerWrapperForContext(func(p []byte) (int, error) {
 			select {
 			case <-ctx.Done():
 				return 0, ctx.Err()
 			default:
 				return src.Read(p)
 			}
-		})); copyErr != nil {
+		}))
+		if copyErr != nil {
 			return copyErr
-		} else {
-			downloadedBytes += copyBytes
 		}
-		if dstCloseErr := dst.Close(); dstCloseErr != nil {
-			return dstCloseErr
-		}
-		if srcCloseErr := src.Close(); srcCloseErr != nil {
-			return srcCloseErr
-		}
+		downloadedBytes += copyBytes
 		//log.Debug().Msgf("extract %s", extractFile)
 		return nil
-	}); extractErr != nil {
+	})
+	if extractErr != nil {
 		return 0, extractErr
 	}
 	bd.throttleSpeed(startTime, remoteFileInfo.Size(), maxSpeed)
@@ -385,7 +400,21 @@ func (bd *BackupDestination) UploadCompressedStream(ctx context.Context, baseLoc
 		if err != nil {
 			return err
 		}
-		archiveFiles := make([]archiver.File, 0)
+
+		// Prepare the writer chain: pipe -> compression -> archive
+		var archiveWriter io.Writer = w
+		var compressor io.WriteCloser
+		if z.compression != nil {
+			compressor, err = z.compression.OpenWriter(w)
+			if err != nil {
+				return fmt.Errorf("failed to open compressor: %w", err)
+			}
+			defer compressor.Close()
+			archiveWriter = compressor
+		}
+
+		// Prepare file list
+		archiveFiles := make([]archives.FileInfo, 0)
 		for _, f := range files {
 			localPath := path.Join(baseLocalPath, f)
 			info, err := os.Stat(localPath)
@@ -396,17 +425,21 @@ func (bd *BackupDestination) UploadCompressedStream(ctx context.Context, baseLoc
 				continue
 			}
 
-			file := archiver.File{
+			// Capture localPath in closure correctly
+			capturedPath := localPath
+			file := archives.FileInfo{
 				FileInfo:      info,
 				NameInArchive: f,
-				Open: func() (io.ReadCloser, error) {
-					return os.Open(localPath)
+				Open: func() (fs.File, error) {
+					return os.Open(capturedPath)
 				},
 			}
 			archiveFiles = append(archiveFiles, file)
 			//log.Debug().Msgf("add %s to archive %s", filePath, remotePath)
 		}
-		if writerErr = z.Archive(ctx, w, archiveFiles); writerErr != nil {
+
+		// Write archive
+		if writerErr = z.archival.Archive(ctx, archiveWriter, archiveFiles); writerErr != nil {
 			return writerErr
 		}
 		return nil

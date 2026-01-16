@@ -3,7 +3,7 @@ package storage
 import (
 	"fmt"
 	"github.com/klauspost/compress/zstd"
-	"github.com/mholt/archiver/v4"
+	"github.com/mholt/archives"
 	"github.com/rs/zerolog/log"
 	"sort"
 	"strings"
@@ -60,48 +60,65 @@ func GetBackupsToDeleteRemote(backups []Backup, keep int) []Backup {
 	return []Backup{}
 }
 
-func getArchiveWriter(format string, level int) (*archiver.CompressedArchive, error) {
-	switch format {
-	case "tar":
-		return &archiver.CompressedArchive{Archival: archiver.Tar{}}, nil
-	case "lz4":
-		return &archiver.CompressedArchive{Compression: archiver.Lz4{CompressionLevel: level}, Archival: archiver.Tar{}}, nil
-	case "bzip2", "bz2":
-		return &archiver.CompressedArchive{Compression: archiver.Bz2{CompressionLevel: level}, Archival: archiver.Tar{}}, nil
-	case "gzip", "gz":
-		return &archiver.CompressedArchive{Compression: archiver.Gz{CompressionLevel: level, Multithreaded: true}, Archival: archiver.Tar{}}, nil
-	case "sz":
-		return &archiver.CompressedArchive{Compression: archiver.Sz{}, Archival: archiver.Tar{}}, nil
-	case "xz":
-		return &archiver.CompressedArchive{Compression: archiver.Xz{}, Archival: archiver.Tar{}}, nil
-	case "br", "brotli":
-		return &archiver.CompressedArchive{Compression: archiver.Brotli{Quality: level}, Archival: archiver.Tar{}}, nil
-	case "zstd":
-		return &archiver.CompressedArchive{Compression: archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level))}}, Archival: archiver.Tar{}}, nil
-	}
-	return nil, fmt.Errorf("wrong compression_format: %s, supported: 'tar', 'lz4', 'bzip2', 'bz2', 'gzip', 'gz', 'sz', 'xz', 'br', 'brotli', 'zstd'", format)
+type compressedArchive struct {
+	compression archives.Compression
+	archival    archives.Archival
 }
 
-func getArchiveReader(format string) (*archiver.CompressedArchive, error) {
+func getArchiveWriter(format string, level int) (*compressedArchive, error) {
+	archival := archives.Tar{}
+	var compression archives.Compression
+
 	switch format {
 	case "tar":
-		return &archiver.CompressedArchive{Archival: archiver.Tar{}}, nil
+		return &compressedArchive{archival: archival}, nil
 	case "lz4":
-		return &archiver.CompressedArchive{Compression: archiver.Lz4{}, Archival: archiver.Tar{}}, nil
+		compression = archives.Lz4{CompressionLevel: level}
 	case "bzip2", "bz2":
-		return &archiver.CompressedArchive{Compression: archiver.Bz2{}, Archival: archiver.Tar{}}, nil
+		compression = archives.Bz2{CompressionLevel: level}
 	case "gzip", "gz":
-		return &archiver.CompressedArchive{Compression: archiver.Gz{Multithreaded: true}, Archival: archiver.Tar{}}, nil
+		compression = archives.Gz{CompressionLevel: level, Multithreaded: true}
 	case "sz":
-		return &archiver.CompressedArchive{Compression: archiver.Sz{}, Archival: archiver.Tar{}}, nil
+		compression = archives.Sz{}
 	case "xz":
-		return &archiver.CompressedArchive{Compression: archiver.Xz{}, Archival: archiver.Tar{}}, nil
+		compression = archives.Xz{}
 	case "br", "brotli":
-		return &archiver.CompressedArchive{Compression: archiver.Brotli{}, Archival: archiver.Tar{}}, nil
+		compression = archives.Brotli{Quality: level}
 	case "zstd":
-		return &archiver.CompressedArchive{Compression: archiver.Zstd{}, Archival: archiver.Tar{}}, nil
+		compression = archives.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level))}}
+	default:
+		return nil, fmt.Errorf("wrong compression_format: %s, supported: 'tar', 'lz4', 'bzip2', 'bz2', 'gzip', 'gz', 'sz', 'xz', 'br', 'brotli', 'zstd'", format)
 	}
-	return nil, fmt.Errorf("wrong compression_format: %s, supported: 'tar', 'lz4', 'bzip2', 'bz2', 'gzip', 'gz', 'sz', 'xz', 'br', 'brotli', 'zstd'", format)
+
+	return &compressedArchive{compression: compression, archival: archival}, nil
+}
+
+func getArchiveReader(format string) (*compressedArchive, error) {
+	archival := archives.Tar{}
+	var compression archives.Compression
+
+	switch format {
+	case "tar":
+		return &compressedArchive{archival: archival}, nil
+	case "lz4":
+		compression = archives.Lz4{}
+	case "bzip2", "bz2":
+		compression = archives.Bz2{}
+	case "gzip", "gz":
+		compression = archives.Gz{Multithreaded: true}
+	case "sz":
+		compression = archives.Sz{}
+	case "xz":
+		compression = archives.Xz{}
+	case "br", "brotli":
+		compression = archives.Brotli{}
+	case "zstd":
+		compression = archives.Zstd{}
+	default:
+		return nil, fmt.Errorf("wrong compression_format: %s, supported: 'tar', 'lz4', 'bzip2', 'bz2', 'gzip', 'gz', 'sz', 'xz', 'br', 'brotli', 'zstd'", format)
+	}
+
+	return &compressedArchive{compression: compression, archival: archival}, nil
 }
 
 func checkArchiveExtension(ext, format string) bool {
